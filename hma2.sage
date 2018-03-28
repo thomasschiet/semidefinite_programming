@@ -20,6 +20,7 @@ write a post on our ELO forum.
 
 import subprocess
 import itertools
+import numpy as np
 from scipy.misc import imread, imsave
 
 
@@ -292,13 +293,13 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
         ## block size
         sdpa_file += str(I + 1) + "\n"
         #3 constraint RHS
-        sdpa_file += ("1 "*(I + 1))[:-1] + "\n"
+        sdpa_file += ("1 "* (I + 1)) + "\n"
 
 
         sdpa_file += "0 1 1 1 1.0\n"
 
         g = vector(B)
-        C = matrix(I + 1)
+        C = np.zeros((I + 1, I + 1))
 
         def indexToCoords(index):
             y = int(math.floor(index / B.nrows()))
@@ -313,7 +314,7 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
 
         # add first sum
         for i in range(1, I + 1):
-            C[0, i] = 2 * g[i-1]
+            C[0, i] = 2.0 * g[i-1]
         
         # add second sum
         for i in range(1, I + 1):
@@ -324,7 +325,7 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
         # add objective to SDPA file
         for i in range(1, I + 1):
             for j in range(1, I + 1):
-                if i >= j:
+                if i >= j and C[i, j] != 0:
                     sdpa_file += "0 1 %(i)s %(j)s %(c)f\n" % {'i': i, 'j': j, 'c': C[i, j]}
 
         # NB: SDPA is 1-indexed
@@ -339,9 +340,38 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
         out.write(sdpa_file)
         out.close()
 
-        print run_csdp('sdp_filter.spda', 'sdp_filter.sol')
+        run_csdp('sdp_filter.sdpa', 'sdp_filter.sol')
 
-        # print read_csdp_solution('sdp_filter.sol', [ I ])
+        result = read_csdp_solution('sdp_filter.sol', [ I + 1 ])[0]
+
+        # hyperplane roundings
+        V = result.cholesky()
+        f = np.zeros((I, nrounds))
+        obj = np.zeros(nrounds)
+
+        def f_obj(x, g):
+            result = np.sum(map(lambda i: (x[i] - g[i]) ** 2, range(0, I)))
+            ij_s = list(itertools.product(range(0, n_col_segments), range(0, n_row_segments)))
+            result += lda/2 * np.sum(map(lambda ij: (x[ij[0]] - x[ij[1]]) ** 2, filter(lambda ij: areNeighbors(ij[0], ij[1]), ij_s)))
+
+            return result
+        
+        for n_round in range(0, nrounds):
+            z = np.random.normal(0, 1, I + 1)
+            if (np.inner(z, V[0]) < 0):
+                z *= -1
+            
+            for i in range(1, I + 1):
+                f[i-1, n_round] = np.sign(np.inner(z, V[i]))
+            
+            obj[n_round] = f_obj(f[:, n_round], g)
+        
+        #TODO: pick best f
+        print obj
+        print max(obj)
+        print min(obj)
+    
+    # TODO: stitch segments together
 
 
     # Save the final image.
