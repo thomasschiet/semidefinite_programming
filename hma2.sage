@@ -23,7 +23,8 @@ import itertools
 import numpy as np
 from numpy import linalg as LA
 from scipy.misc import imread, imsave
-
+import time
+import copy
 
 def run_csdp(filename, solfile):
     """Run CSDP and return True on success, False on failure.
@@ -213,7 +214,7 @@ def normalize_matrix(A):
 
 
 def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
-               border_size = 0, nrounds = 100):
+               border_size = 0, nrounds = 1000):
     """Apply deblurring sdp filter to image.
 
     INPUT:
@@ -285,14 +286,13 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
         if y != 0:
             image = np.delete(image, range(0, border_size), 1)
 
-        ## TODO: should delete rows at the end
         if x != x_max:
-            image = np.delete(image, range(0, border_size), 0)
+            image = np.delete(image, range(block_size, block_size + border_size), 0)
 
         ## TODO: should delete columns at the end
         if y != y_max:
-            image = np.delete(image, range(0, border_size), 1)
-                
+            image = np.delete(image, range(block_size, block_size + border_size), 1)                
+
         return image
 
     for x, y, segment in segments:
@@ -313,7 +313,7 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
         sdpa_file += ("1 "* (I + 1)) + "\n"
 
 
-        sdpa_file += "0 1 1 1 1.0\n"
+        # sdpa_file += "0 1 1 1 1.0\n"
 
         g = vector(B)
         C = np.zeros((I + 1, I + 1))
@@ -332,19 +332,19 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
         # add first sum
         for i in range(1, I + 1):
             C[0, i] = 2.0 * g[i-1]
-        
+
         # add second sum
         for i in range(1, I + 1):
             for j in range(1, I + 1):
-                if i >= j and areNeighbors(i, j):
+                if i >= j and areNeighbors(i - 1, j - 1):
                     C[i, j] = lda
 
         # add objective to SDPA file
-        for i in range(1, I + 1):
-            for j in range(1, I + 1):
-                if i >= j and C[i, j] != 0:
+        for i in range(1, I + 2):
+            for j in range(1, I + 2):
+                if i >= j and C[i-1, j-1] != 0:
                     # [matrix number] [block number] [i] [j] [c]
-                    sdpa_file += "0 1 %(i)s %(j)s %(c)f\n" % {'i': i-1, 'j': j-1, 'c': C[i, j]}
+                    sdpa_file += "0 1 %(i)s %(j)s %(c)f\n" % {'i': i, 'j': j, 'c': C[i-1, j-1]}
 
         # NB: SDPA is 1-indexed
         for i in range(1, I + 2):
@@ -354,52 +354,54 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
         # remove extraneous new line character
         # sdpa_file = sdpa_file[:-1]
 
+        # Solve SDP
         out = open('sdp_filter.sdpa', 'w')
         out.write(sdpa_file)
         out.close()
-
         run_csdp('sdp_filter.sdpa', 'sdp_filter.sol')
 
+        # Get SDP result
         result = read_csdp_solution('sdp_filter.sol', [ I + 1 ])[0]
 
         # hyperplane roundings
-        # V = result.cholesky()
-        # D, Q = LA.eig(result)
-        # V = Q * sqrt(D)
-        # V = np.transpose(V)
-        V = result.cholesky()
-        # print V[:,1]
+        V = np.transpose(result.cholesky())
         f = np.zeros(I)
         f_max = np.zeros(I)
 
         def f_obj(g, x):
+            # return 0
             result = np.sum(map(lambda i: 2 * x[i] * g[i], range(0, I)))
             ij_s = list(itertools.product(range(0, n_col_segments), range(0, n_row_segments)))
-            result += lda/2 * np.sum(map(lambda ij: 2 * x[ij[0]] * x[ij[1]], filter(lambda ij: areNeighbors(ij[0], ij[1]), ij_s)))
+            result += lda * np.sum(map(lambda ij: x[ij[0]] * x[ij[1]], filter(lambda ij: areNeighbors(ij[0], ij[1]), ij_s)))
 
             return result
         
         current_max = -10e9
+        start = time.time()
         for n_round in range(0, nrounds):
             z = np.random.normal(0, 1, I + 1)
+            # z /= sqrt(np.inner(z, z))
 
             # V[0] = e
             if (np.inner(z, V[0]) < 0):
                 z *= -1
-            
+
             for i in range(1, I + 1):
                 # note that the first element of f corresponds with the first pixel, so f[0] <=> V[1]
                 f[i-1] = np.sign(np.inner(z, V[i]))
-            
+           
             # Keep f with max objective value
             f_val = f_obj(g, f)
             # print f
             # print f_val
-            print current_max
             # print f_obj(g, )
             if (current_max < f_val):
-                f_max = f
+                f_max = copy.copy(f)
+                print f_max
                 current_max = f_val
+        end = time.time()
+        print("Roundings:")
+        print(end - start)
 
         print g
         m = block_size + 2*border_size
