@@ -21,6 +21,7 @@ write a post on our ELO forum.
 import subprocess
 import itertools
 import numpy as np
+from numpy import linalg as LA
 from scipy.misc import imread, imsave
 
 
@@ -212,7 +213,7 @@ def normalize_matrix(A):
 
 
 def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
-               border_size = 2, nrounds = 30):
+               border_size = 0, nrounds = 100):
     """Apply deblurring sdp filter to image.
 
     INPUT:
@@ -263,6 +264,7 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
     n_col_segments = int(math.floor(A.ncols() / block_size))
     n_row_segments = int(math.floor(A.nrows() / block_size))
 
+    final_image = np.zeros((A.nrows(), A.ncols()))
     # x, y are 0-indexed
     # returns the segment coordinates and a segment of the full image
     def getSegment((x, y)):
@@ -271,12 +273,27 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
         y_0 = max(0, y*10 - border_size)
         y_1 = min(A.nrows(), y*10 + block_size + border_size)
         return x, y, A[x_0:x_1, y_0:y_1]
-    
-    def removeBorder(x, y, image):
-        return image
 
     segments = list(itertools.product(range(0, n_col_segments), range(0, n_row_segments)))
     segments = map(getSegment, segments)
+
+    x_max = max(map(lambda segment: segment[0], segments))
+    y_max = max(map(lambda segment: segment[1], segments))
+    def removeBorder(x, y, image):
+        if x != 0:
+            image = np.delete(image, range(0, border_size), 0)
+        if y != 0:
+            image = np.delete(image, range(0, border_size), 1)
+
+        ## TODO: should delete rows at the end
+        if x != x_max:
+            image = np.delete(image, range(0, border_size), 0)
+
+        ## TODO: should delete columns at the end
+        if y != y_max:
+            image = np.delete(image, range(0, border_size), 1)
+                
+        return image
 
     for x, y, segment in segments:
         # normalized segment
@@ -326,7 +343,8 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
         for i in range(1, I + 1):
             for j in range(1, I + 1):
                 if i >= j and C[i, j] != 0:
-                    sdpa_file += "0 1 %(i)s %(j)s %(c)f\n" % {'i': i, 'j': j, 'c': C[i, j]}
+                    # [matrix number] [block number] [i] [j] [c]
+                    sdpa_file += "0 1 %(i)s %(j)s %(c)f\n" % {'i': i-1, 'j': j-1, 'c': C[i, j]}
 
         # NB: SDPA is 1-indexed
         for i in range(1, I + 2):
@@ -345,31 +363,65 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
         result = read_csdp_solution('sdp_filter.sol', [ I + 1 ])[0]
 
         # hyperplane roundings
+        # V = result.cholesky()
+        # D, Q = LA.eig(result)
+        # V = Q * sqrt(D)
+        # V = np.transpose(V)
         V = result.cholesky()
-        f = np.zeros((I, nrounds))
-        obj = np.zeros(nrounds)
+        # print V[:,1]
+        f = np.zeros(I)
+        f_max = np.zeros(I)
 
-        def f_obj(x, g):
-            result = np.sum(map(lambda i: (x[i] - g[i]) ** 2, range(0, I)))
+        def f_obj(g, x):
+            result = np.sum(map(lambda i: 2 * x[i] * g[i], range(0, I)))
             ij_s = list(itertools.product(range(0, n_col_segments), range(0, n_row_segments)))
-            result += lda/2 * np.sum(map(lambda ij: (x[ij[0]] - x[ij[1]]) ** 2, filter(lambda ij: areNeighbors(ij[0], ij[1]), ij_s)))
+            result += lda/2 * np.sum(map(lambda ij: 2 * x[ij[0]] * x[ij[1]], filter(lambda ij: areNeighbors(ij[0], ij[1]), ij_s)))
 
             return result
         
+        current_max = -10e9
         for n_round in range(0, nrounds):
             z = np.random.normal(0, 1, I + 1)
+
+            # V[0] = e
             if (np.inner(z, V[0]) < 0):
                 z *= -1
             
             for i in range(1, I + 1):
-                f[i-1, n_round] = np.sign(np.inner(z, V[i]))
+                # note that the first element of f corresponds with the first pixel, so f[0] <=> V[1]
+                f[i-1] = np.sign(np.inner(z, V[i]))
             
-            obj[n_round] = f_obj(f[:, n_round], g)
+            # Keep f with max objective value
+            f_val = f_obj(g, f)
+            # print f
+            # print f_val
+            print current_max
+            # print f_obj(g, )
+            if (current_max < f_val):
+                f_max = f
+                current_max = f_val
+
+        print g
+        m = block_size + 2*border_size
+        n = block_size + 2*border_size
+        if x*block_size < border_size:
+            m -= border_size - x*block_size
         
-        #TODO: pick best f
-        print obj
-        print max(obj)
-        print min(obj)
+        if y*block_size < border_size:
+            n -= border_size - y*block_size
+
+        if x == x_max:
+            m -= border_size
+        
+        if y == y_max:
+            n -= border_size
+
+        f_matrix = f_max.reshape(m,n)
+        f_resized = (1+f_matrix)/2 * 255
+        image_block = removeBorder(x, y, f_resized)
+        final_image[x*block_size:(x+1)*block_size,y*block_size:(y+1)*block_size] = image_block
+        imsave(out_filename, final_image)
+        # print min(obj)
     
     # TODO: stitch segments together
 
