@@ -21,7 +21,6 @@ write a post on our ELO forum.
 import subprocess
 import itertools
 import numpy as np
-from numpy import linalg as LA
 from scipy.misc import imread, imsave
 import time
 import copy
@@ -214,7 +213,7 @@ def normalize_matrix(A):
 
 
 def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
-               border_size = 0, nrounds = 1000):
+               border_size = 3, nrounds = 30):
     """Apply deblurring sdp filter to image.
 
     INPUT:
@@ -269,10 +268,10 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
     # x, y are 0-indexed
     # returns the segment coordinates and a segment of the full image
     def getSegment((x, y)):
-        x_0 = max(0, x*10 - border_size)
-        x_1 = min(A.ncols(), x*10 + block_size + border_size)
-        y_0 = max(0, y*10 - border_size)
-        y_1 = min(A.nrows(), y*10 + block_size + border_size)
+        x_0 = max(0, x*block_size - border_size)
+        x_1 = min(A.ncols(), x*block_size + block_size + border_size)
+        y_0 = max(0, y*block_size - border_size)
+        y_1 = min(A.nrows(), y*block_size + block_size + border_size)
         return x, y, A[x_0:x_1, y_0:y_1]
 
     segments = list(itertools.product(range(0, n_col_segments), range(0, n_row_segments)))
@@ -289,7 +288,6 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
         if x != x_max:
             image = np.delete(image, range(block_size, block_size + border_size), 0)
 
-        ## TODO: should delete columns at the end
         if y != y_max:
             image = np.delete(image, range(block_size, block_size + border_size), 1)                
 
@@ -301,6 +299,7 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
 
         # image size of segment
         I = B.nrows() * B.ncols()
+
 
         # contents of sdpa_file
         ## number of constraints
@@ -323,15 +322,31 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
             x = index - y * B.ncols()
             return x, y
         
+        def coordsToIndex(x, y):
+            return x + y * B.ncols()
+        
         def areNeighbors(i, j):
             x_0, y_0 = indexToCoords(i)
             x_1, y_1 = indexToCoords(j)
 
             return max(abs(x_0 - x_1), abs(y_0 - y_1)) <= r
+        
+        def validIndex(i):
+            return 0 <= i < I
 
+        def getNeighbors(i):
+            x, y = indexToCoords(i)
+            xs = map(lambda x_rel: x + x_rel, range(-r, r + 1))
+            ys = map(lambda y_rel: y + y_rel, range(-r, r + 1))
+            xys = itertools.product(xs, ys)
+            indices = map(lambda xy: coordsToIndex(xy[0], xy[1]), xys)
+
+            return filter(validIndex, indices)
+        
         # add first sum
-        for i in range(1, I + 1):
-            C[0, i] = 2.0 * g[i-1]
+        for j in range(1, I + 1):
+            C[0, j] = 2.0 * g[j-1]
+            C[j, 0] = 2.0 * g[j-1]
 
         # add second sum
         for i in range(1, I + 1):
@@ -340,20 +355,18 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
                     C[i, j] = lda
 
         # add objective to SDPA file
-        for i in range(1, I + 2):
+        for i in range(0, I + 2):
             for j in range(1, I + 2):
                 if i >= j and C[i-1, j-1] != 0:
                     # [matrix number] [block number] [i] [j] [c]
                     sdpa_file += "0 1 %(i)s %(j)s %(c)f\n" % {'i': i, 'j': j, 'c': C[i-1, j-1]}
 
+        # Add constraints
         # NB: SDPA is 1-indexed
         for i in range(1, I + 2):
             # [matrix number] [block number] [i] [j] [c]
             sdpa_file += "i 1 i i 1.0\n".replace("i", str(i))
         
-        # remove extraneous new line character
-        # sdpa_file = sdpa_file[:-1]
-
         # Solve SDP
         out = open('sdp_filter.sdpa', 'w')
         out.write(sdpa_file)
@@ -364,15 +377,16 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
         result = read_csdp_solution('sdp_filter.sol', [ I + 1 ])[0]
 
         # hyperplane roundings
-        V = np.transpose(result.cholesky())
+        V = np.matrix(result.cholesky())
         f = np.zeros(I)
         f_max = np.zeros(I)
 
         def f_obj(g, x):
-            # return 0
             result = np.sum(map(lambda i: 2 * x[i] * g[i], range(0, I)))
-            ij_s = list(itertools.product(range(0, n_col_segments), range(0, n_row_segments)))
-            result += lda * np.sum(map(lambda ij: x[ij[0]] * x[ij[1]], filter(lambda ij: areNeighbors(ij[0], ij[1]), ij_s)))
+
+            if (lda > 0 and r >= 1):
+                neighbors = [(i, neighbor) for i in range(0, I) for neighbor in getNeighbors(i)]
+                result += lda * np.sum(map(lambda ij: x[ij[0]] * x[ij[1]], neighbors))
 
             return result
         
@@ -380,7 +394,6 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
         start = time.time()
         for n_round in range(0, nrounds):
             z = np.random.normal(0, 1, I + 1)
-            # z /= sqrt(np.inner(z, z))
 
             # V[0] = e
             if (np.inner(z, V[0]) < 0):
@@ -392,18 +405,10 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
            
             # Keep f with max objective value
             f_val = f_obj(g, f)
-            # print f
-            # print f_val
-            # print f_obj(g, )
             if (current_max < f_val):
                 f_max = copy.copy(f)
-                print f_max
                 current_max = f_val
-        end = time.time()
-        print("Roundings:")
-        print(end - start)
 
-        print g
         m = block_size + 2*border_size
         n = block_size + 2*border_size
         if x*block_size < border_size:
@@ -423,14 +428,6 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
         image_block = removeBorder(x, y, f_resized)
         final_image[x*block_size:(x+1)*block_size,y*block_size:(y+1)*block_size] = image_block
         imsave(out_filename, final_image)
-        # print min(obj)
-    
-    # TODO: stitch segments together
-
-
-    # Save the final image.
-    # imsave(out_filename, R)
-
 
 def interval_minimum(p, a, b, filename):
     """Write SDP whose optimal is minimum of p on [a, b].
