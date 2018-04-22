@@ -384,7 +384,7 @@ def sdp_filter(in_filename, out_filename, lda, r, block_size = 10,
         def f_obj(g, x):
             result = np.sum(map(lambda i: 2 * x[i] * g[i], range(0, I)))
 
-            if (lda > 0 and r >= 1):
+            if (lda > 0):
                 neighbors = [(i, neighbor) for i in range(0, I) for neighbor in getNeighbors(i)]
                 result += lda * np.sum(map(lambda ij: x[ij[0]] * x[ij[1]], neighbors))
 
